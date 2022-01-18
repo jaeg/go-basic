@@ -1,18 +1,35 @@
 package basic
 
 import (
-	"fmt"
+	"errors"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
+type TokenType int
+
+const (
+	TokenTypeVariable TokenType = iota
+	TokenTypeString
+	TokenTypeNumber
+	TokenTypeFunction
+	TokenTypeControl
+	TokenTypeOp
+	TokenTypeEquals
+	TokenTypeParens
+	TokenTypeWord
+	TokenTypeLabel
+	TokenTypeInvalid
+	TokenTypeNewLine
+)
+
 type Token struct {
 	Value string
-	Type  string
+	Type  TokenType
 }
 
-func Tokenize(input []string) []Token {
+func Tokenize(input []string) ([]Token, error) {
 	//Clean up input and chunk it apart.
 	inputChunked := make([][]string, 1)
 	for lineI := 0; lineI < len(input); lineI++ {
@@ -23,6 +40,7 @@ func Tokenize(input []string) []Token {
 				inputChunked[lineI] = append(inputChunked[lineI], tokenizedLine[i])
 			}
 		}
+		//inputChunked[lineI] = append(inputChunked[lineI], "\n")
 	}
 
 	//Get rid of empty lines
@@ -34,9 +52,10 @@ func Tokenize(input []string) []Token {
 	}
 
 	state := "search" //  string, search, number
+	invalid := false
 	specialCharacters := "=+-*/<>()!"
 	builtInfunctions := []string{"write"}
-	controlFunctions := []string{"if", "endif", "goto", "print", "move", "else"}
+	controlFunctions := []string{"if", "endif", "goto", "else", "print"}
 
 	tokenizedProgram := []Token{}
 	tempToken := ""
@@ -46,13 +65,14 @@ func Tokenize(input []string) []Token {
 			switch state {
 			case "search":
 				tempToken = ""
+
 				if strings.Contains(specialCharacters, chunk) {
-					t := "op"
+					t := TokenTypeOp
 					if chunk == "=" {
-						t = "equals"
+						t = TokenTypeEquals
 					}
 					if chunk == "(" || chunk == ")" {
-						t = "paren"
+						t = TokenTypeParens
 					}
 					if chunk == "!" {
 						if chunkI < len(inputChunked[lineI])-1 {
@@ -63,47 +83,67 @@ func Tokenize(input []string) []Token {
 						}
 					}
 					tokenizedProgram = append(tokenizedProgram, Token{Value: chunk, Type: t})
-					break
 				} else if _, err := strconv.Atoi(chunk); err == nil {
 					state = "number"
 					tempToken = chunk
+					break
 				} else if chunk == "\"" {
 					state = "string"
+					break
 				} else if inArray(builtInfunctions, chunk) {
-					tokenizedProgram = append(tokenizedProgram, Token{Value: chunk, Type: "function"})
+					tokenizedProgram = append(tokenizedProgram, Token{Value: chunk, Type: TokenTypeFunction})
+					break
 				} else if inArray(controlFunctions, chunk) {
-					tokenizedProgram = append(tokenizedProgram, Token{Value: chunk, Type: "control"})
+					tokenizedProgram = append(tokenizedProgram, Token{Value: chunk, Type: TokenTypeControl})
+					break
+				} else if chunk == "\n" {
+					tokenizedProgram = append(tokenizedProgram, Token{Value: chunk, Type: TokenTypeNewLine})
+					break
 				} else {
 					state = "word"
 					tempToken = chunk
-				}
 
-				if chunkI == len(inputChunked[lineI])-1 && lineI == len(inputChunked)-1 {
-					tokenizedProgram = append(tokenizedProgram, Token{Value: chunk, Type: state})
+					if chunkI == len(inputChunked[lineI])-1 && lineI == len(inputChunked)-1 {
+						invalid = true
+						tokenizedProgram = append(tokenizedProgram, Token{Value: chunk, Type: TokenTypeInvalid})
+					}
+					break
 				}
-				break
 			case "number":
+				//Handling decimal numbers
 				if chunk == "." {
 					tempToken += "."
-				} else if len(tempToken) > 1 {
-					if tempToken[len(tempToken)-1] == '.' {
-						if _, err := strconv.Atoi(chunk); err == nil {
-							fmt.Println("Failed to tokenize this line: ", lineI)
-							return nil
-						} else {
-							tempToken += chunk
-						}
+				} else if tempToken[len(tempToken)-1] == '.' {
+					//Handle the numbers that come after the decimal while checking to make sure they are actual numbers.
+					if _, err := strconv.Atoi(chunk); err != nil {
+						tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: TokenTypeInvalid})
+						state = "search" // Return to searching for the next token type.
+						invalid = true
+					} else {
+						tempToken += chunk
 					}
 				} else {
-					tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: "number"})
+					//The number is complete add to the program
+					tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: TokenTypeNumber})
 					state = "search"
+
+					// Because this tokenization is happening to tokens in passing if we have a
+					// completed number at chunk 0 it it means we had a new line.
+					if chunkI == 0 {
+						tokenizedProgram = append(tokenizedProgram, Token{Value: "", Type: TokenTypeNewLine})
+					}
+
 					chunkI-- //We take a step back so we make sure the scan search state can check it out
 				}
-				break
+
+				//Handle being the last chunk..
+				if chunkI == len(inputChunked[lineI])-1 && lineI == len(inputChunked)-1 {
+					tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: TokenTypeNumber})
+				}
 
 			case "string":
 				if chunk == "\"" {
-					tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: "string"})
+					tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: TokenTypeString})
 					state = "search"
 				} else {
 					if tempToken != "" {
@@ -111,22 +151,34 @@ func Tokenize(input []string) []Token {
 					}
 					tempToken += chunk
 				}
-				break
+
 			case "word":
 				if chunk == "_" {
 					tempToken += chunk
 				} else if chunk == ":" { //Colons indicate labels.
-					tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: "label"})
+					tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: TokenTypeLabel})
 					state = "search"
 				} else {
-					tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: "word"})
+					tokenizedProgram = append(tokenizedProgram, Token{Value: tempToken, Type: TokenTypeWord})
 					state = "search"
 					chunkI--
 				}
 			}
 		}
+
+		if state == "search" {
+			tokenizedProgram = append(tokenizedProgram, Token{Value: "", Type: TokenTypeNewLine})
+		}
+
 	}
-	return tokenizedProgram
+
+	//Do a quick check for invalid t
+	var err error
+	if invalid {
+		err = errors.New("invalid syntax while tokenizing")
+	}
+
+	return tokenizedProgram, err
 }
 
 func Split(re *regexp.Regexp, s string, n int) []string {
